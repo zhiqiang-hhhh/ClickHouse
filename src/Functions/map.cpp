@@ -65,7 +65,8 @@ public:
     DataTypePtr getReturnTypeImpl(const DataTypes & arguments) const override
     {
         if (arguments.size() % 2 != 0)
-            throw Exception("Function " + getName() + " even number of arguments", ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH);
+            throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
+                "Function {} requires even number of arguments, but {} given", getName(), arguments.size());
 
         DataTypes keys, values;
         for (size_t i = 0; i < arguments.size(); i += 2)
@@ -177,6 +178,8 @@ public:
         return std::make_shared<DataTypeUInt8>();
     }
 
+    bool useDefaultImplementationForConstants() const override { return true; }
+
     ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr & result_type, size_t input_rows_count) const override
     {
         const ColumnMap * col_map = typeid_cast<const ColumnMap *>(arguments[0].column.get());
@@ -233,6 +236,8 @@ public:
         return std::make_shared<DataTypeArray>(key_type);
     }
 
+    bool useDefaultImplementationForConstants() const override { return true; }
+
     ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr & /*result_type*/, size_t /*input_rows_count*/) const override
     {
         const ColumnMap * col_map = typeid_cast<const ColumnMap *>(arguments[0].column.get());
@@ -277,6 +282,8 @@ public:
 
         return std::make_shared<DataTypeArray>(value_type);
     }
+
+    bool useDefaultImplementationForConstants() const override { return true; }
 
     ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr & /*result_type*/, size_t /*input_rows_count*/) const override
     {
