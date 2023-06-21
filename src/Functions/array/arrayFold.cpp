@@ -1,5 +1,8 @@
 #include <cassert>
+#include <cstddef>
 #include <memory>
+#include <unordered_map>
+#include <unordered_set>
 #include <Functions/FunctionFactory.h>
 #include <Poco/Logger.h>
 
@@ -10,6 +13,7 @@
 #include "Columns/ColumnFunction.h"
 #include "Columns/IColumn.h"
 #include "Core/ColumnWithTypeAndName.h"
+#include "Core/ColumnsWithTypeAndName.h"
 #include "DataTypes/DataTypeArray.h"
 #include "DataTypes/DataTypeLowCardinality.h"
 #include "DataTypes/DataTypeFunction.h"
@@ -164,59 +168,70 @@ ColumnPtr FunctionArrayFold::executeImpl(const ColumnsWithTypeAndName & argument
     if (rows_count == 0)
             return arguments.back().column->convertToFullColumnIfConst()->cloneEmpty();
 
-    ColumnWithTypeAndName column_accumulator = arguments.back();
-    std::vector<size_t> array_size_vec(rows_count);
     const ColumnArray::Offsets & array_offsets = checkAndGetColumn<ColumnArray>(column_first_array.get())->getOffsets();
-    size_t max_array_size = rows_count ? array_offsets[0] : 0;
-    std::map<size_t, ColumnPtr> row_res;
+    size_t max_array_size = array_offsets[0];
+    std::vector<size_t> array_size_vec;
+    array_size_vec.reserve(rows_count);
+    // We will traversal input metric, and use mutable column to record temporary input for lambda function.
+    // std::unordered_map<size_t, std::vector<MutableColumnPtr>> array_size_mutable_inputs;
+    // array_size_mutable_inputs.reserve(max_array_size);
 
-    for (size_t i = 0; i < rows_count; ++i)
+    // Convert mutable column to ColumnsWithTypeAndName for real lambda input.
+    std::unordered_map<size_t, ColumnsWithTypeAndName> array_size_input;
+    array_size_input.reserve(max_array_size);
+
+    for (size_t irow = 0; irow < rows_count; ++irow)
     {
-        auto size = array_offsets[i] - array_offsets[i - 1];
-        array_size_vec[i] = size;
-        max_array_size = std::max(max_array_size, array_size_vec[i]);
-        if (size == 0)
-        {
-            // use accumulator as its final result, cause lambda should not be executed on empty array
-            row_res[i] = arguments.back().column;
-        }
+        const size_t array_size = array_offsets[irow] - array_offsets[irow - 1];
+        max_array_size = std::max(max_array_size, array_size);
+        array_size_vec.emplace_back(array_size);
+        ColumnsWithTypeAndName tmp2;
+        tmp2.reserve(arguments_count - 1);
+        array_size_input[array_size] = std::move(tmp2);
     }
 
-    ColumnsWithTypeAndName columns_lambda_input;
-    columns_lambda_input.reserve(arguments_count - 1);
-
-    for (size_t array_size = 1; array_size <= max_array_size; ++array_size)
+    for (size_t icolumn = 0; icolumn < arguments_count - 2; ++icolumn)
     {
-        columns_lambda_input.clear();
-
-        for (size_t column_idx = 0; column_idx < arguments_count - 2; ++column_idx)
+        const auto & array_element_with_type_and_name = arrays[icolumn];
+        const ColumnPtr& column_array_element_ptr = array_element_with_type_and_name.column;
+        
+        for (size_t isize = 1; isize <= max_array_size; ++isize)
         {
-            const auto & array_element_with_type_and_name = arrays[column_idx];
-            const ColumnPtr& column_array_element_ptr = array_element_with_type_and_name.column;
-            MutableColumnPtr column_lambda_input = array_element_with_type_and_name.column->cloneEmpty();
+            auto column_input = column_array_element_ptr->cloneEmpty();
 
             for (size_t irow = 0; irow < rows_count; ++irow)
             {
-                if (array_size_vec[irow] >= array_size)
+                const size_t array_element_idx = array_offsets[irow - 1] + isize - 1;
+                const bool insert_default = array_size_vec[irow] < isize;
+                if (insert_default)
                 {
-                    const size_t array_begin = array_offsets[irow - 1];
-                    const size_t array_element_idx = array_begin + array_size - 1;
-                    column_lambda_input->insert((*column_array_element_ptr)[array_element_idx]);
+                    column_input->insertDefault();
                 }
                 else
                 {
-                    // When current array is smaller than array_size, we insert dummy data
-                    // to avoid heavy operation on array, otherwise we need to do scattor like operation.
-                    // Dummy data has no effect on result of current row, cause result
-                    // of dummy data will not be added to final result.
-                    column_lambda_input->insertDefault();
+                    column_input->insertRangeFrom((*column_array_element_ptr), array_element_idx, 1);
                 }
             }
 
-            columns_lambda_input.emplace_back(
-                ColumnWithTypeAndName(std::move(column_lambda_input), array_element_with_type_and_name.type, array_element_with_type_and_name.name));
+            array_size_input[isize].emplace_back(ColumnWithTypeAndName(
+                std::move(column_input), array_element_with_type_and_name.type, array_element_with_type_and_name.name));
+            // auto s = array_size_input[isize].size();
+            // std::cout << s << std::endl;
         }
+    }
+    
+    ColumnWithTypeAndName column_accumulator = arguments.back();
+    std::vector<ColumnPtr> array_size_res;
+    array_size_res.reserve(max_array_size);
+    array_size_res.emplace_back(arguments.back().column);
+    // auto t = array_size_input.size();
+    // std::cout << t << std::endl;
 
+    for (size_t array_size = 1; array_size <= max_array_size; ++array_size)
+    {
+        auto& columns_lambda_input = array_size_input[array_size];
+        // auto s = columns_lambda_input.size();
+        // std::cout << s << std::endl;
         columns_lambda_input.emplace_back(column_accumulator);
         auto mutable_column_function_ptr = IColumn::mutate(column_function->getPtr());
         auto * mutable_column_function = typeid_cast<ColumnFunction *>(mutable_column_function_ptr.get());
@@ -227,20 +242,19 @@ ColumnPtr FunctionArrayFold::executeImpl(const ColumnsWithTypeAndName & argument
             lambda_result = lambda_result->convertToFullColumnIfLowCardinality();
 
         column_accumulator.column = lambda_result;
-
-        for (size_t irow = 0; irow < rows_count; ++irow)
-        {
-            if (array_size_vec[irow] - array_size == 0)
-            {
-                /// We got the final accumulator of current row, final accumulator is exactly the result of current row.
-                row_res[irow] = ColumnPtr(lambda_result->cut(irow, 1));
-            }
-        }
+        array_size_res.emplace_back(lambda_result);
     }
 
     MutableColumnPtr result = arguments.back().column->convertToFullColumnIfConst()->cloneEmpty();
-    for (auto & row_re : row_res)
-        result->insert((*row_re.second)[0]);
+    for (size_t i = 0; i < rows_count; ++i) {
+        result->insert((*ColumnPtr(array_size_res[array_size_vec[i]]->cut(i, 1)))[0]);
+    }
+
+    // MutableColumnPtr result = arguments.back().column->convertToFullColumnIfConst()->cloneEmpty();
+    // for (size_t i = 0; i < rows_count; ++i) {
+    //     result->insert((*row_res[i])[0]);
+    // }
+        
     return result;
 }
 
