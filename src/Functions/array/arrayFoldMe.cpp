@@ -203,7 +203,8 @@ ColumnPtr FunctionArrayFold::executeImpl(const ColumnsWithTypeAndName & argument
                 }
                 else
                 {
-                    column_input->insertRangeFrom((*column_array_element_ptr), array_element_idx, 1);
+                    // column_input->insertRangeFrom(const IColumn &src, size_t start, size_t length)
+                    column_input->insertFrom((*column_array_element_ptr), array_element_idx);
                 }
             }
 
